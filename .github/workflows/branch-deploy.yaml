@@ -1,0 +1,184 @@
+name: Branch Environment Deployment
+on:
+  push:
+    branches-ignore:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Branch name to deploy (if manual trigger)'
+        required: false
+        type: string
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  APPLICATION_ID: ${{ vars.APPLICATION_ID }}
+  ENVIRONMENT: ${{ github.event.inputs.branch_name || github.ref_name }}
+  IMAGE_TAG: ${{ github.run_number }}-${{ github.run_attempt}}
+  CPU_SPEC: ${{ vars.CPU_SPEC }}
+  MEMORY_SPEC: ${{ vars.MEMORY_SPEC }}
+  NEXT_PUBLIC_BASE_URL: ${{ vars.NEXT_PUBLIC_BASE_URL }}
+  BUILD_ID: ${{ github.run_id }}
+  BUILD_NUMBER: ${{ github.run_number }}-${{ github.run_attempt}}
+  BUILD_SOURCE_VERSION: ${{ github.sha }}
+  PREFIX: ${{ vars.APPLICATION_ID }}-${{ github.event.inputs.branch_name || github.ref_name }}
+
+jobs:
+  validate_branch_name:
+    name: Validate Branch Name
+    runs-on: ubuntu-latest
+    outputs:
+      branch_name: ${{ steps.clean_branch_name.outputs.result }}
+    steps:
+      - name: Clean branch name for resource naming
+        id: clean_branch_name
+        uses: actions/github-script@v6
+        with:
+          script: |
+            // Create a valid name for AWS resources
+            // Replace invalid characters, truncate if too long
+            const branchName = '${{ github.event.inputs.branch_name || github.ref_name }}'
+              .toLowerCase()
+              .replace(/[^a-z0-9]/g, '-')
+              .replace(/-+/g, '-')
+              .replace(/^-|-$/g, '');
+            
+            // Ensure it's not too long (max 63 chars for many AWS resources)
+            const truncated = branchName.substring(0, 20);
+            console.log(`Original branch name: ${{ github.event.inputs.branch_name || github.ref_name }}`);
+            console.log(`Sanitized branch name: ${truncated}`);
+            return truncated;
+
+  iam_deploy:
+    name: Deploy IAM Role for Branch Environment
+    needs: validate_branch_name
+    runs-on: ubuntu-latest
+    environment: Development
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE}}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "yarn"
+          cache-dependency-path: infra/yarn.lock
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ needs.validate_branch_name.outputs.branch_name }}" >> $GITHUB_ENV
+          echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ needs.validate_branch_name.outputs.branch_name }}" >> $GITHUB_ENV
+      - name: Install project dependencies
+        run: cd infra && yarn install
+      - name: Bootstrap CDK
+        working-directory: infra
+        run: |
+          yarn cdk bootstrap
+      - name: Deploy IAM
+        working-directory: infra
+        run: |
+          yarn cdk:deploy:iam-stack
+
+  ecr_deploy:
+    needs: [iam_deploy, validate_branch_name]
+    name: Deploy ECR for Branch Environment
+    runs-on: ubuntu-latest
+    environment: Development
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE}}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "yarn"
+          cache-dependency-path: infra/yarn.lock
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ needs.validate_branch_name.outputs.branch_name }}" >> $GITHUB_ENV
+          echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ needs.validate_branch_name.outputs.branch_name }}" >> $GITHUB_ENV
+      - name: Install project dependencies
+        run: cd infra && yarn install
+      - name: Deploy ECR
+        working-directory: infra
+        run: |
+          yarn cdk:deploy:ecr-stack
+
+  docker_deploy:
+    needs: [ecr_deploy, validate_branch_name]
+    name: Build Docker Image for Branch Environment
+    runs-on: ubuntu-latest
+    environment: Development
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v3
+      - uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE }}
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ needs.validate_branch_name.outputs.branch_name }}" >> $GITHUB_ENV
+          echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ needs.validate_branch_name.outputs.branch_name }}" >> $GITHUB_ENV
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Build, tag, and push image to Amazon ECR
+        working-directory: .
+        run: |
+          docker build -t $APPLICATION_ID-$ENVIRONMENT . \
+          --build-arg NEXT_PUBLIC_BASE_URL=$NEXT_PUBLIC_BASE_URL \
+          --build-arg BUILD_ID=$BUILD_ID \
+          --build-arg BUILD_NUMBER=$BUILD_NUMBER \
+          --build-arg BUILD_SOURCE_VERSION=$BUILD_SOURCE_VERSION
+          docker tag $APPLICATION_ID-$ENVIRONMENT:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$APPLICATION_ID-$ENVIRONMENT:$IMAGE_TAG
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$APPLICATION_ID-$ENVIRONMENT:$IMAGE_TAG
+
+  ecs_deploy:
+    needs: [docker_deploy, validate_branch_name]
+    name: Deploy ECS for Branch Environment
+    runs-on: ubuntu-latest
+    environment: Development
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE}}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "yarn"
+          cache-dependency-path: infra/yarn.lock
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ needs.validate_branch_name.outputs.branch_name }}" >> $GITHUB_ENV
+          echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ needs.validate_branch_name.outputs.branch_name }}" >> $GITHUB_ENV
+      - name: Install project dependencies
+        run: cd infra && yarn install
+      - name: Deploy ECS
+        working-directory: infra
+        run: |
+          yarn cdk:deploy:ecs-stack 

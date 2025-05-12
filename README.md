@@ -61,12 +61,53 @@ Ensure the IAM role created has a trust relationship with GitHub Actions. This c
 ├── src/              # Source code
 ├── infra/            # AWS CDK scripts for defining infrastructure
 ├── Dockerfile        # Docker configuration for containerizing the source code
+├── .github/workflows # GitHub Actions workflow configuration
 ├── ...
 ```
 
 - src: Contains the Node.js application logic.
 - infra: Contains AWS CDK scripts for defining infrastructure.
 - Dockerfile: Docker configuration for containerizing the source code.
+- .github/workflows: Contains GitHub Actions workflow configuration.
+
+## Feature: Branch-Based Environments
+
+This project supports automatic deployment of separate environments for each branch you create. This is useful for:
+
+- Feature development
+- Testing changes in isolation
+- Preview environments for stakeholders
+
+### How It Works
+
+1. **Creating a Branch Environment**:
+   - When you create and push a new branch, GitHub Actions automatically:
+     - Creates branch-specific infrastructure (IAM roles, ECR repository, ECS service)
+     - Builds and deploys your application to this isolated environment
+     - Uses branch name as part of resource identifiers
+
+2. **Accessing Branch Environments**:
+   - Each branch gets its own load balancer URL
+   - The URL will be shown in the GitHub Actions workflow output
+
+3. **Cleaning Up**:
+   - When you delete a branch, resources are automatically cleaned up
+   - You can also manually trigger cleanup via the GitHub Actions UI
+
+### Manual Deployment/Cleanup
+
+You can manually deploy or clean up a branch environment:
+
+1. Go to the "Actions" tab in your GitHub repository
+2. Select either "Branch Environment Deployment" or "Branch Environment Cleanup"
+3. Click "Run workflow"
+4. Enter the branch name when prompted
+
+### Best Practices
+
+- Use descriptive, short branch names (they're used in AWS resource names)
+- Delete branches when no longer needed to avoid unnecessary AWS costs
+- Limit concurrent branches to control AWS resource usage
 
 ## Customization
 
