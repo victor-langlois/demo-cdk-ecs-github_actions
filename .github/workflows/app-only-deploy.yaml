@@ -137,44 +137,35 @@ jobs:
       id-token: write
       contents: read
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-region: ${{ vars.AWS_REGION }}
           role-to-assume: ${{ vars.AWS_ROLE}}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "yarn"
+          cache-dependency-path: infra/yarn.lock
       - name: Set environment variables
         run: |
           echo "ENVIRONMENT=${{ needs.validate_environment.outputs.environment_name }}" >> $GITHUB_ENV
           echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ needs.validate_environment.outputs.environment_name }}" >> $GITHUB_ENV
-      - name: Update ECS service
+      - name: Install project dependencies
+        run: cd infra && yarn install
+      - name: Update ECS via CDK
+        working-directory: infra
         run: |
-          # Get current task definition
-          TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition $PREFIX-ecs-taskdef --query 'taskDefinition' --output json)
+          # S'assurer que les variables d'environnement sont définies correctement pour CDK
+          export ENVIRONMENT=${{ needs.validate_environment.outputs.environment_name }}
+          export PREFIX=${{ vars.APPLICATION_ID }}-${{ needs.validate_environment.outputs.environment_name }}
+          export IMAGE_TAG=${{ env.IMAGE_TAG }}
           
-          # Create new task definition with the new image
-          NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | jq --arg IMAGE "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$APPLICATION_ID-$ENVIRONMENT:$IMAGE_TAG" '.containerDefinitions[0].image = $IMAGE')
+          # Utiliser CDK pour déployer uniquement la stack ECS avec la nouvelle image
+          echo "Deploying new image via CDK: $PREFIX:$IMAGE_TAG"
+          yarn cdk:deploy:ecs-stack
           
-          # Register new task definition
-          FAMILY=$(echo $TASK_DEFINITION | jq -r '.family')
-          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --family $FAMILY \
-            --container-definitions "$(echo $NEW_TASK_DEFINITION | jq '.containerDefinitions')" \
-            --task-role-arn "$(echo $TASK_DEFINITION | jq -r '.taskRoleArn')" \
-            --execution-role-arn "$(echo $TASK_DEFINITION | jq -r '.executionRoleArn')" \
-            --network-mode "$(echo $TASK_DEFINITION | jq -r '.networkMode')" \
-            --volumes "$(echo $TASK_DEFINITION | jq '.volumes')" \
-            --cpu "$(echo $TASK_DEFINITION | jq -r '.cpu')" \
-            --memory "$(echo $TASK_DEFINITION | jq -r '.memory')" \
-            --requires-compatibilities "$(echo $TASK_DEFINITION | jq '.requiresCompatibilities')" \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-          
-          # Update the service
-          aws ecs update-service \
-            --cluster $PREFIX \
-            --service $PREFIX \
-            --task-definition $NEW_TASK_DEF_ARN \
-            --force-new-deployment
-          
-          echo "ECS service updated with new task definition: $NEW_TASK_DEF_ARN"
+          echo "ECS service updated via CDK to avoid infrastructure drift"
           echo "Deployment in progress. Check the AWS Console for status." 
