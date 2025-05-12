@@ -1,6 +1,5 @@
 # AWS CDK Node.js App with GitHub Actions
 
-[![GitHub Actions Status](https://github.com/nguyenkhavi/gha-cdk-ecs-starter/actions/workflows/dev.yaml/badge.svg)](https://github.com/victor-langlois/demo-cdk-ecs-github_actions/actions/workflows/dev.yaml)
 [![Development](https://github.com/victor-langlois/demo-cdk-ecs-github_actions/actions/workflows/dev.yaml/badge.svg?branch=main)](https://github.com/victor-langlois/demo-cdk-ecs-github_actions/actions/workflows/dev.yaml)
 
 ## Overview
