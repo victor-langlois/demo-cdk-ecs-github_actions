@@ -20,6 +20,12 @@ on:
         required: false
         type: string
 
+# Permissions globales
+permissions:
+  id-token: write
+  contents: read
+  actions: write # Nécessaire pour déclencher d'autres workflows
+
 jobs:
   prepare_deployment:
     name: Préparer le déploiement
@@ -56,73 +62,361 @@ jobs:
           echo "👉 Nom d'environnement: $ENV_NAME"
           echo "👉 Type de déploiement: ${{ github.event.inputs.deployment_type }}"
 
-  trigger_app_only:
-    name: Déployer la nouvelle version d'application
-    needs: prepare_deployment
+  # ===== Option App Only - Déploiement de l'application seulement =====
+  validate_environment:
+    name: Valider l'environnement (App Only)
     if: needs.prepare_deployment.outputs.deployment_type == 'app_only'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: Déclencher le déploiement d'application
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'app-only-deploy.yaml',
-              ref: 'main',
-              inputs: {
-                environment_name: '${{ needs.prepare_deployment.outputs.env_name }}'
-              }
-            })
-            console.log("✅ Déploiement d'application lancé pour l'environnement: ${{ needs.prepare_deployment.outputs.env_name }}")
-
-  trigger_full_deploy:
-    name: Déployer l'environnement complet
     needs: prepare_deployment
+    runs-on: ubuntu-latest
+    outputs:
+      environment_name: ${{ steps.clean_name.outputs.result }}
+    steps:
+      - name: Clean environment name for resource naming
+        id: clean_name
+        uses: actions/github-script@v6
+        with:
+          script: |
+            // Clean up the environment name
+            const envName = '${{ needs.prepare_deployment.outputs.env_name }}'
+              .toLowerCase()
+              .replace(/[^a-z0-9]/g, '-')
+              .replace(/-+/g, '-')
+              .replace(/^-|-$/g, '');
+            
+            console.log(`Original name: ${{ needs.prepare_deployment.outputs.env_name }}`);
+            console.log(`Sanitized name: ${envName}`);
+            return envName;
+
+  check_resources:
+    name: Vérifier si l'environnement existe (App Only)
+    if: needs.prepare_deployment.outputs.deployment_type == 'app_only'
+    needs: [prepare_deployment, validate_environment]
+    runs-on: ubuntu-latest
+    outputs: 
+      exists: ${{ steps.check.outputs.result }}
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE}}
+      - name: Check if environment resources exist
+        id: check
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            
+            try {
+              // Try to get info about the ECS service - this will fail if it doesn't exist
+              const cmd = `aws ecs describe-services --cluster ${{ vars.APPLICATION_ID }}-${{ needs.validate_environment.outputs.environment_name }} --services ${{ vars.APPLICATION_ID }}-${{ needs.validate_environment.outputs.environment_name }}`;
+              execSync(cmd);
+              console.log('Environment exists');
+              return true;
+            } catch (error) {
+              console.log('Environment does not exist: ' + error.message);
+              return false;
+            }
+
+  error_if_not_exists:
+    name: Erreur si l'environnement n'existe pas (App Only)
+    if: needs.prepare_deployment.outputs.deployment_type == 'app_only' && needs.check_resources.outputs.exists == 'false'
+    needs: [prepare_deployment, check_resources, validate_environment]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail workflow
+        run: |
+          echo "ERREUR: L'environnement '${{ needs.validate_environment.outputs.environment_name }}' n'existe pas."
+          echo "Vous devez d'abord le créer en utilisant le déploiement d'environnement complet."
+          exit 1
+
+  docker_build:
+    name: Construire l'image Docker (App Only)
+    if: needs.prepare_deployment.outputs.deployment_type == 'app_only' && needs.check_resources.outputs.exists == 'true'
+    needs: [prepare_deployment, check_resources, validate_environment]
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: ${{ needs.validate_environment.outputs.environment_name }}
+      PREFIX: ${{ vars.APPLICATION_ID }}-${{ needs.validate_environment.outputs.environment_name }}
+      IMAGE_TAG: ${{ github.run_number }}-${{ github.run_attempt}}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Build, tag, and push image to Amazon ECR
+        working-directory: .
+        run: |
+          # Build the Docker image
+          docker build -t ${{ vars.APPLICATION_ID }}-$ENVIRONMENT . \
+          --build-arg NEXT_PUBLIC_BASE_URL=${{ vars.NEXT_PUBLIC_BASE_URL }} \
+          --build-arg BUILD_ID=${{ github.run_id }} \
+          --build-arg BUILD_NUMBER=${{ github.run_number }}-${{ github.run_attempt}} \
+          --build-arg BUILD_SOURCE_VERSION=${{ github.sha }}
+          
+          # Tag and push to ECR
+          docker tag ${{ vars.APPLICATION_ID }}-$ENVIRONMENT:latest ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.APPLICATION_ID }}-$ENVIRONMENT:$IMAGE_TAG
+          docker push ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.APPLICATION_ID }}-$ENVIRONMENT:$IMAGE_TAG
+          
+          echo "New image pushed: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.APPLICATION_ID }}-$ENVIRONMENT:$IMAGE_TAG"
+
+  update_service:
+    name: Mettre à jour le service ECS (App Only)
+    if: needs.prepare_deployment.outputs.deployment_type == 'app_only' && needs.check_resources.outputs.exists == 'true'
+    needs: [prepare_deployment, docker_build, validate_environment, check_resources]
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: ${{ needs.validate_environment.outputs.environment_name }}
+      PREFIX: ${{ vars.APPLICATION_ID }}-${{ needs.validate_environment.outputs.environment_name }}
+      IMAGE_TAG: ${{ github.run_number }}-${{ github.run_attempt}}
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE}}
+      - name: Update ECS service
+        run: |
+          # Get current task definition
+          TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition $PREFIX-ecs-taskdef --query 'taskDefinition' --output json)
+          
+          # Create new task definition with the new image
+          NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | jq --arg IMAGE "${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.APPLICATION_ID }}-$ENVIRONMENT:$IMAGE_TAG" '.containerDefinitions[0].image = $IMAGE')
+          
+          # Register new task definition
+          FAMILY=$(echo $TASK_DEFINITION | jq -r '.family')
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --family $FAMILY \
+            --container-definitions "$(echo $NEW_TASK_DEFINITION | jq '.containerDefinitions')" \
+            --task-role-arn "$(echo $TASK_DEFINITION | jq -r '.taskRoleArn')" \
+            --execution-role-arn "$(echo $TASK_DEFINITION | jq -r '.executionRoleArn')" \
+            --network-mode "$(echo $TASK_DEFINITION | jq -r '.networkMode')" \
+            --volumes "$(echo $TASK_DEFINITION | jq '.volumes')" \
+            --cpu "$(echo $TASK_DEFINITION | jq -r '.cpu')" \
+            --memory "$(echo $TASK_DEFINITION | jq -r '.memory')" \
+            --requires-compatibilities "$(echo $TASK_DEFINITION | jq '.requiresCompatibilities')" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          # Update the service
+          aws ecs update-service \
+            --cluster $PREFIX \
+            --service $PREFIX \
+            --task-definition $NEW_TASK_DEF_ARN \
+            --force-new-deployment
+          
+          echo "Service ECS mis à jour avec la nouvelle définition de tâche: $NEW_TASK_DEF_ARN"
+          echo "Déploiement en cours. Consultez la console AWS pour le statut."
+
+  # ===== Option Full Deploy - Déploiement complet =====
+  deploy_iam:
+    name: Déployer IAM (Full Deploy)
     if: needs.prepare_deployment.outputs.deployment_type == 'full'
+    needs: prepare_deployment
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-      - name: Déclencher le déploiement complet
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE}}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "yarn"
+          cache-dependency-path: infra/yarn.lock
+      - name: Sanitize branch name
+        id: sanitize
         uses: actions/github-script@v6
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'branch-deploy.yaml',
-              ref: 'main',
-              inputs: {
-                branch_name: '${{ needs.prepare_deployment.outputs.branch }}'
-              }
-            })
-            console.log("✅ Déploiement complet lancé pour la branche: ${{ needs.prepare_deployment.outputs.branch }}")
+            const branchName = '${{ needs.prepare_deployment.outputs.branch }}'
+              .toLowerCase()
+              .replace(/[^a-z0-9]/g, '-')
+              .replace(/-+/g, '-')
+              .replace(/^-|-$/g, '');
+            
+            const truncated = branchName.substring(0, 20);
+            return truncated;
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ steps.sanitize.outputs.result }}" >> $GITHUB_ENV
+          echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ steps.sanitize.outputs.result }}" >> $GITHUB_ENV
+      - name: Install project dependencies
+        run: cd infra && yarn install
+      - name: Bootstrap CDK
+        working-directory: infra
+        run: |
+          yarn cdk bootstrap
+      - name: Deploy IAM
+        working-directory: infra
+        run: |
+          yarn cdk:deploy:iam-stack
+
+  deploy_ecr:
+    name: Déployer ECR (Full Deploy)
+    if: needs.prepare_deployment.outputs.deployment_type == 'full'
+    needs: [prepare_deployment, deploy_iam]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE}}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "yarn"
+          cache-dependency-path: infra/yarn.lock
+      - name: Sanitize branch name
+        id: sanitize
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const branchName = '${{ needs.prepare_deployment.outputs.branch }}'
+              .toLowerCase()
+              .replace(/[^a-z0-9]/g, '-')
+              .replace(/-+/g, '-')
+              .replace(/^-|-$/g, '');
+            
+            const truncated = branchName.substring(0, 20);
+            return truncated;
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ steps.sanitize.outputs.result }}" >> $GITHUB_ENV
+          echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ steps.sanitize.outputs.result }}" >> $GITHUB_ENV
+      - name: Install project dependencies
+        run: cd infra && yarn install
+      - name: Deploy ECR
+        working-directory: infra
+        run: |
+          yarn cdk:deploy:ecr-stack
+
+  build_docker_full:
+    name: Construire Docker (Full Deploy)
+    if: needs.prepare_deployment.outputs.deployment_type == 'full'
+    needs: [prepare_deployment, deploy_ecr]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE }}
+      - name: Sanitize branch name
+        id: sanitize
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const branchName = '${{ needs.prepare_deployment.outputs.branch }}'
+              .toLowerCase()
+              .replace(/[^a-z0-9]/g, '-')
+              .replace(/-+/g, '-')
+              .replace(/^-|-$/g, '');
+            
+            const truncated = branchName.substring(0, 20);
+            return truncated;
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ steps.sanitize.outputs.result }}" >> $GITHUB_ENV
+          echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ steps.sanitize.outputs.result }}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=${{ github.run_number }}-${{ github.run_attempt}}" >> $GITHUB_ENV
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Build, tag, and push image to Amazon ECR
+        working-directory: .
+        run: |
+          docker build -t ${{ vars.APPLICATION_ID }}-$ENVIRONMENT . \
+          --build-arg NEXT_PUBLIC_BASE_URL=${{ vars.NEXT_PUBLIC_BASE_URL }} \
+          --build-arg BUILD_ID=${{ github.run_id }} \
+          --build-arg BUILD_NUMBER=${{ github.run_number }}-${{ github.run_attempt}} \
+          --build-arg BUILD_SOURCE_VERSION=${{ github.sha }}
+          docker tag ${{ vars.APPLICATION_ID }}-$ENVIRONMENT:latest ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.APPLICATION_ID }}-$ENVIRONMENT:$IMAGE_TAG
+          docker push ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.APPLICATION_ID }}-$ENVIRONMENT:$IMAGE_TAG
+
+  deploy_ecs:
+    name: Déployer ECS (Full Deploy)
+    if: needs.prepare_deployment.outputs.deployment_type == 'full'
+    needs: [prepare_deployment, build_docker_full]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE}}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "yarn"
+          cache-dependency-path: infra/yarn.lock
+      - name: Sanitize branch name
+        id: sanitize
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const branchName = '${{ needs.prepare_deployment.outputs.branch }}'
+              .toLowerCase()
+              .replace(/[^a-z0-9]/g, '-')
+              .replace(/-+/g, '-')
+              .replace(/^-|-$/g, '');
+            
+            const truncated = branchName.substring(0, 20);
+            return truncated;
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ steps.sanitize.outputs.result }}" >> $GITHUB_ENV
+          echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ steps.sanitize.outputs.result }}" >> $GITHUB_ENV
+      - name: Install project dependencies
+        run: cd infra && yarn install
+      - name: Deploy ECS
+        working-directory: infra
+        run: |
+          yarn cdk:deploy:ecs-stack
 
   show_success:
     name: Afficher le succès
-    needs: [prepare_deployment, trigger_app_only, trigger_full_deploy]
-    if: always() && (needs.trigger_app_only.result == 'success' || needs.trigger_full_deploy.result == 'success')
+    needs: [
+      prepare_deployment, 
+      validate_environment, check_resources, docker_build, update_service,
+      deploy_iam, deploy_ecr, build_docker_full, deploy_ecs
+    ]
+    if: >-
+      always() && 
+      (
+        (needs.prepare_deployment.outputs.deployment_type == 'app_only' && needs.update_service.result == 'success') || 
+        (needs.prepare_deployment.outputs.deployment_type == 'full' && needs.deploy_ecs.result == 'success')
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Message de succès
         run: |
-          echo "✅ Le déploiement a été lancé avec succès!"
+          echo "✅ Le déploiement a été complété avec succès!"
           echo "📊 Détails du déploiement:"
           echo "  • Type: ${{ github.event.inputs.deployment_type }}"
           echo "  • Branche: ${{ needs.prepare_deployment.outputs.branch }}"
-          echo "  • Environnement: ${{ needs.prepare_deployment.outputs.env_name }}"
           
           if [ "${{ needs.prepare_deployment.outputs.deployment_type }}" = "app_only" ]; then
+            echo "  • Environnement: ${{ needs.validate_environment.outputs.environment_name }}"
             echo ""
-            echo "🔍 Vous pouvez suivre le progrès dans l'onglet Actions"
+            echo "🔍 L'application a été mise à jour et est en cours de déploiement"
           else
+            echo "  • Environnement: $ENVIRONMENT"
             echo ""
-            echo "⏳ Le déploiement complet a été lancé et prendra plus de temps"
-            echo "🔍 Vous pouvez suivre le progrès dans l'onglet Actions"
+            echo "🔍 L'environnement complet a été déployé"
+            echo "⏳ Vous pouvez accéder à l'application via le Load Balancer URL dans la console AWS"
           fi 
