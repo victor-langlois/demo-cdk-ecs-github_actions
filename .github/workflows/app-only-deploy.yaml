@@ -1,0 +1,180 @@
+name: App-Only Deployment
+on:
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        description: 'Environment name to deploy to (used in resource naming)'
+        required: true
+        type: string
+      docker_tag:
+        description: 'Custom Docker tag (default: run_number-run_attempt)'
+        required: false
+        type: string
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  APPLICATION_ID: ${{ vars.APPLICATION_ID }}
+  ENVIRONMENT: ${{ inputs.environment_name }}
+  IMAGE_TAG: ${{ inputs.docker_tag || github.run_number }}-${{ github.run_attempt}}
+  NEXT_PUBLIC_BASE_URL: ${{ vars.NEXT_PUBLIC_BASE_URL }}
+  BUILD_ID: ${{ github.run_id }}
+  BUILD_NUMBER: ${{ github.run_number }}-${{ github.run_attempt}}
+  BUILD_SOURCE_VERSION: ${{ github.sha }}
+  PREFIX: ${{ vars.APPLICATION_ID }}-${{ inputs.environment_name }}
+
+jobs:
+  validate_environment:
+    name: Validate Environment Name
+    runs-on: ubuntu-latest
+    outputs:
+      environment_name: ${{ steps.clean_name.outputs.result }}
+    steps:
+      - name: Clean environment name for resource naming
+        id: clean_name
+        uses: actions/github-script@v6
+        with:
+          script: |
+            // Clean up the environment name
+            const envName = '${{ inputs.environment_name }}'
+              .toLowerCase()
+              .replace(/[^a-z0-9]/g, '-')
+              .replace(/-+/g, '-')
+              .replace(/^-|-$/g, '');
+            
+            console.log(`Original name: ${{ inputs.environment_name }}`);
+            console.log(`Sanitized name: ${envName}`);
+            return envName;
+
+  check_resources:
+    name: Check If Environment Exists
+    needs: validate_environment
+    runs-on: ubuntu-latest
+    outputs: 
+      exists: ${{ steps.check.outputs.result }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE}}
+      - name: Check if environment resources exist
+        id: check
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            
+            try {
+              // Try to get info about the ECS service - this will fail if it doesn't exist
+              const cmd = `aws ecs describe-services --cluster ${{ vars.APPLICATION_ID }}-${{ needs.validate_environment.outputs.environment_name }} --services ${{ vars.APPLICATION_ID }}-${{ needs.validate_environment.outputs.environment_name }}`;
+              execSync(cmd);
+              console.log('Environment exists');
+              return true;
+            } catch (error) {
+              console.log('Environment does not exist: ' + error.message);
+              return false;
+            }
+
+  error_if_not_exists:
+    name: Error if Environment Does Not Exist
+    needs: [check_resources, validate_environment]
+    runs-on: ubuntu-latest
+    if: needs.check_resources.outputs.exists == 'false'
+    steps:
+      - name: Fail workflow
+        run: |
+          echo "ERROR: Environment '${{ needs.validate_environment.outputs.environment_name }}' does not exist."
+          echo "You need to create it first using the 'Branch Environment Deployment' workflow."
+          exit 1
+
+  docker_build:
+    name: Build & Push Docker Image
+    needs: [check_resources, validate_environment]
+    if: needs.check_resources.outputs.exists == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE }}
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ needs.validate_environment.outputs.environment_name }}" >> $GITHUB_ENV
+          echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ needs.validate_environment.outputs.environment_name }}" >> $GITHUB_ENV
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Build, tag, and push image to Amazon ECR
+        working-directory: .
+        run: |
+          # Build the Docker image
+          docker build -t $APPLICATION_ID-$ENVIRONMENT . \
+          --build-arg NEXT_PUBLIC_BASE_URL=$NEXT_PUBLIC_BASE_URL \
+          --build-arg BUILD_ID=$BUILD_ID \
+          --build-arg BUILD_NUMBER=$BUILD_NUMBER \
+          --build-arg BUILD_SOURCE_VERSION=$BUILD_SOURCE_VERSION
+          
+          # Tag and push to ECR
+          docker tag $APPLICATION_ID-$ENVIRONMENT:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$APPLICATION_ID-$ENVIRONMENT:$IMAGE_TAG
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$APPLICATION_ID-$ENVIRONMENT:$IMAGE_TAG
+          
+          echo "New image pushed: $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$APPLICATION_ID-$ENVIRONMENT:$IMAGE_TAG"
+
+  update_service:
+    name: Update ECS Service
+    needs: [docker_build, validate_environment]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE}}
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ needs.validate_environment.outputs.environment_name }}" >> $GITHUB_ENV
+          echo "PREFIX=${{ vars.APPLICATION_ID }}-${{ needs.validate_environment.outputs.environment_name }}" >> $GITHUB_ENV
+      - name: Update ECS service
+        run: |
+          # Get current task definition
+          TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition $PREFIX-ecs-taskdef --query 'taskDefinition' --output json)
+          
+          # Create new task definition with the new image
+          NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | jq --arg IMAGE "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$APPLICATION_ID-$ENVIRONMENT:$IMAGE_TAG" '.containerDefinitions[0].image = $IMAGE')
+          
+          # Register new task definition
+          FAMILY=$(echo $TASK_DEFINITION | jq -r '.family')
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --family $FAMILY \
+            --container-definitions "$(echo $NEW_TASK_DEFINITION | jq '.containerDefinitions')" \
+            --task-role-arn "$(echo $TASK_DEFINITION | jq -r '.taskRoleArn')" \
+            --execution-role-arn "$(echo $TASK_DEFINITION | jq -r '.executionRoleArn')" \
+            --network-mode "$(echo $TASK_DEFINITION | jq -r '.networkMode')" \
+            --volumes "$(echo $TASK_DEFINITION | jq '.volumes')" \
+            --cpu "$(echo $TASK_DEFINITION | jq -r '.cpu')" \
+            --memory "$(echo $TASK_DEFINITION | jq -r '.memory')" \
+            --requires-compatibilities "$(echo $TASK_DEFINITION | jq '.requiresCompatibilities')" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          # Update the service
+          aws ecs update-service \
+            --cluster $PREFIX \
+            --service $PREFIX \
+            --task-definition $NEW_TASK_DEF_ARN \
+            --force-new-deployment
+          
+          echo "ECS service updated with new task definition: $NEW_TASK_DEF_ARN"
+          echo "Deployment in progress. Check the AWS Console for status." 

@@ -72,15 +72,24 @@ Ensure the IAM role created has a trust relationship with GitHub Actions. This c
 
 ## Feature: Branch-Based Environments
 
-This project supports automatic deployment of separate environments for each branch you create. This is useful for:
+This project supports two ways to work with branch environments:
 
-- Feature development
-- Testing changes in isolation
-- Preview environments for stakeholders
+1. **Complete Branch Environment Deployment**: Create a fully isolated infrastructure for each branch
+2. **Application-Only Deployment**: Deploy just a new application version to an existing environment 
 
-### How It Works
+These options give you flexibility in your development and testing workflows.
 
-1. **Creating a Branch Environment**:
+### Option 1: Complete Branch Environment (Infrastructure + App)
+
+When you need a fully isolated environment with its own infrastructure:
+
+- **Use case**: Feature development requiring infrastructure changes, major version testing
+- **Resources created**: IAM roles, ECR repository, ECS service, Load Balancer, etc.
+- **Workflow**: `Branch Environment Deployment`
+
+#### How It Works
+
+1. **Creating a Complete Branch Environment**:
    - When you create and push a new branch, GitHub Actions automatically:
      - Creates branch-specific infrastructure (IAM roles, ECR repository, ECS service)
      - Builds and deploys your application to this isolated environment
@@ -94,14 +103,33 @@ This project supports automatic deployment of separate environments for each bra
    - When you delete a branch, resources are automatically cleaned up
    - You can also manually trigger cleanup via the GitHub Actions UI
 
+### Option 2: Application-Only Deployment
+
+When you just need to update the application code without changing infrastructure:
+
+- **Use case**: Rapid iteration, bug fixes, content updates
+- **Resources updated**: Only the Docker container image and ECS task definition
+- **Workflow**: `App-Only Deployment`
+
+#### How It Works
+
+1. The workflow checks if the specified environment exists
+2. Builds and pushes a new Docker image to the existing ECR repository
+3. Updates the ECS service with the new image without changing infrastructure
+
+This is much faster than a full deployment and doesn't require infrastructure changes.
+
 ### Manual Deployment/Cleanup
 
-You can manually deploy or clean up a branch environment:
+You can manually trigger any of these workflows:
 
 1. Go to the "Actions" tab in your GitHub repository
-2. Select either "Branch Environment Deployment" or "Branch Environment Cleanup"
+2. Select the desired workflow:
+   - `Branch Environment Deployment`: For full infrastructure + app
+   - `App-Only Deployment`: For just updating the application
+   - `Branch Environment Cleanup`: For removing an environment
 3. Click "Run workflow"
-4. Enter the branch name when prompted
+4. Enter the branch/environment name when prompted
 
 ### Best Practices
 
