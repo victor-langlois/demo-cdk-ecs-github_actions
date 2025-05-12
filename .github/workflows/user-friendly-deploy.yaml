@@ -1,0 +1,128 @@
+name: 🚀 Déployer une application
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_type:
+        description: "Type de déploiement"
+        required: true
+        type: choice
+        options:
+          - "Nouvelle version d'application seulement (rapide)"
+          - "Environnement complet (infrastructure + application)"
+        default: "Nouvelle version d'application seulement (rapide)"
+      branch_name:
+        description: "Nom de la branche à déployer"
+        required: true
+        type: string
+        default: "dev"
+      environment_name:
+        description: "Nom de l'environnement (par défaut: même que la branche)"
+        required: false
+        type: string
+
+jobs:
+  prepare_deployment:
+    name: Préparer le déploiement
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.set_values.outputs.branch }}
+      env_name: ${{ steps.set_values.outputs.env_name }}
+      deployment_type: ${{ steps.set_values.outputs.deployment_type }}
+    steps:
+      - name: Établir les valeurs
+        id: set_values
+        run: |
+          # Définir le nom de la branche
+          BRANCH="${{ github.event.inputs.branch_name }}"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          
+          # Définir le nom de l'environnement (utiliser le nom de branche si non fourni)
+          if [ -z "${{ github.event.inputs.environment_name }}" ]; then
+            ENV_NAME="${BRANCH}"
+          else
+            ENV_NAME="${{ github.event.inputs.environment_name }}"
+          fi
+          echo "env_name=$ENV_NAME" >> $GITHUB_OUTPUT
+          
+          # Définir le type de déploiement (1=app only, 2=full)
+          if [ "${{ github.event.inputs.deployment_type }}" = "Nouvelle version d'application seulement (rapide)" ]; then
+            echo "deployment_type=app_only" >> $GITHUB_OUTPUT
+          else
+            echo "deployment_type=full" >> $GITHUB_OUTPUT
+          fi
+          
+          # Afficher un résumé
+          echo "👉 Nom de branche: $BRANCH"
+          echo "👉 Nom d'environnement: $ENV_NAME"
+          echo "👉 Type de déploiement: ${{ github.event.inputs.deployment_type }}"
+
+  trigger_app_only:
+    name: Déployer la nouvelle version d'application
+    needs: prepare_deployment
+    if: needs.prepare_deployment.outputs.deployment_type == 'app_only'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Déclencher le déploiement d'application
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'app-only-deploy.yaml',
+              ref: 'main',
+              inputs: {
+                environment_name: '${{ needs.prepare_deployment.outputs.env_name }}'
+              }
+            })
+            console.log("✅ Déploiement d'application lancé pour l'environnement: ${{ needs.prepare_deployment.outputs.env_name }}")
+
+  trigger_full_deploy:
+    name: Déployer l'environnement complet
+    needs: prepare_deployment
+    if: needs.prepare_deployment.outputs.deployment_type == 'full'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Déclencher le déploiement complet
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'branch-deploy.yaml',
+              ref: 'main',
+              inputs: {
+                branch_name: '${{ needs.prepare_deployment.outputs.branch }}'
+              }
+            })
+            console.log("✅ Déploiement complet lancé pour la branche: ${{ needs.prepare_deployment.outputs.branch }}")
+
+  show_success:
+    name: Afficher le succès
+    needs: [prepare_deployment, trigger_app_only, trigger_full_deploy]
+    if: always() && (needs.trigger_app_only.result == 'success' || needs.trigger_full_deploy.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Message de succès
+        run: |
+          echo "✅ Le déploiement a été lancé avec succès!"
+          echo "📊 Détails du déploiement:"
+          echo "  • Type: ${{ github.event.inputs.deployment_type }}"
+          echo "  • Branche: ${{ needs.prepare_deployment.outputs.branch }}"
+          echo "  • Environnement: ${{ needs.prepare_deployment.outputs.env_name }}"
+          
+          if [ "${{ needs.prepare_deployment.outputs.deployment_type }}" = "app_only" ]; then
+            echo ""
+            echo "🔍 Vous pouvez suivre le progrès dans l'onglet Actions"
+          else
+            echo ""
+            echo "⏳ Le déploiement complet a été lancé et prendra plus de temps"
+            echo "🔍 Vous pouvez suivre le progrès dans l'onglet Actions"
+          fi 

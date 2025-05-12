@@ -53,7 +53,7 @@ Ensure the IAM role created has a trust relationship with GitHub Actions. This c
    }
    ```
 
-4. Follow [these steps](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html) to add the GitHub OIDC provider to IAM. For the provider URL: Use https://token.actions.githubusercontent.com and use `sts.amazonaws.com` for the "Audience" if you are using the [official action](https://github.com/aws-actions/configure-aws-credentials).
+4. Follow [these steps](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html) to add the GitHub OIDC provider to IAM. For the provider URL: Use <https://token.actions.githubusercontent.com> and use `sts.amazonaws.com` for the "Audience" if you are using the [official action](https://github.com/aws-actions/configure-aws-credentials).
 
 ## Project Structure
 
@@ -75,7 +75,7 @@ Ensure the IAM role created has a trust relationship with GitHub Actions. This c
 This project supports two ways to work with branch environments:
 
 1. **Complete Branch Environment Deployment**: Create a fully isolated infrastructure for each branch
-2. **Application-Only Deployment**: Deploy just a new application version to an existing environment 
+2. **Application-Only Deployment**: Deploy just a new application version to an existing environment
 
 These options give you flexibility in your development and testing workflows.
 
@@ -128,8 +128,24 @@ You can manually trigger any of these workflows:
    - `Branch Environment Deployment`: For full infrastructure + app
    - `App-Only Deployment`: For just updating the application
    - `Branch Environment Cleanup`: For removing an environment
+   - `🚀 Déployer une application`: User-friendly interface for non-technical users
 3. Click "Run workflow"
 4. Enter the branch/environment name when prompted
+
+#### User-Friendly Deployment Interface
+
+For team members who are less familiar with GitHub and technical details, we've created a simplified deployment interface:
+
+1. Go to the "Actions" tab in your GitHub repository
+2. Select the `🚀 Déployer une application` workflow
+3. Click "Run workflow"
+4. Choose your deployment options:
+   - Type: Choose between application-only (fast) or complete environment
+   - Branch: Enter the branch name to deploy
+   - Environment: (Optional) Use a custom environment name
+5. Click "Run workflow" again to start the deployment
+
+This simplified interface handles all the technical details behind the scenes and provides clear status updates.
 
 ### Best Practices
 
