@@ -2,6 +2,14 @@
 
 [![Development](https://github.com/victor-langlois/demo-cdk-ecs-github_actions/actions/workflows/dev.yaml/badge.svg?branch=main)](https://github.com/victor-langlois/demo-cdk-ecs-github_actions/actions/workflows/dev.yaml)
 
+## 📢 Recent Updates
+
+The project documentation has been significantly enhanced:
+
+- **Expanded workflow documentation**: Added detailed troubleshooting guides, performance considerations, and integration information
+- **Improved inline comments**: Added comprehensive comments to GitHub Actions workflows
+- **New workflow change log**: Created `docs/workflow-changes.md` to track workflow modifications
+
 ## Overview
 
 This project is a Node.js application deployed to AWS ECS using AWS CDK. It demonstrates a basic CI/CD pipeline using GitHub Actions for continuous integration, Docker for containerization, and AWS CDK for infrastructure as code.
@@ -166,3 +174,237 @@ The Dockerfile (Dockerfile) in the root directory defines the configuration for 
 ### Customizing AWS CDK Scripts
 
 The AWS CDK scripts are located in the infra directory. Customize the scripts in infra to define your AWS infrastructure according to your requirements.
+
+## Deployment Process Visualization
+
+Here's a high-level overview of the deployment process:
+
+```mermaid
+graph TD
+    A[GitHub Repository] --> B{GitHub Actions};
+    B -- CI/CD Workflow --> C[AWS CDK];
+    C -- Provisions Infrastructure --> D[AWS Cloud];
+    D --> E[VPC];
+    D --> F[ECR - Docker Registry];
+    D --> G[ECS - Container Orchestration];
+    B -- Builds & Pushes Docker Image --> F;
+    B -- Deploys Application --> G;
+    G -- Runs Application in --> E;
+```
+
+More detailed diagrams for specific workflows are provided below.
+
+### Branch Environment Deployment Workflow
+
+This diagram illustrates the process of creating a complete branch environment, including both infrastructure and application deployment.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant GitHub
+    participant GitHubActions as GitHub Actions
+    participant CDK
+    participant AWS_ECR as AWS ECR
+    participant AWS_ECS as AWS ECS
+    participant AWS_Cloud as AWS Cloud (VPC, LB, etc.)
+
+    User->>GitHub: Push new branch (e.g., feature/new-feature)
+    GitHub->>GitHubActions: Trigger "Branch Environment Deployment" workflow
+    GitHubActions->>CDK: Synthesize & Deploy Infrastructure (branch-specific)
+    CDK->>AWS_Cloud: Create/Update VPC, IAM Roles, Security Groups
+    CDK->>AWS_ECR: Create ECR Repository (if not exists for branch)
+    CDK->>AWS_ECS: Create ECS Cluster, Service, Task Definition (initial)
+    AWS_Cloud-->>CDK: Infrastructure ready
+    AWS_ECR-->>CDK: ECR Repository ready
+    AWS_ECS-->>CDK: ECS Service ready
+    CDK-->>GitHubActions: Infrastructure deployment complete
+    GitHubActions->>GitHubActions: Build Docker Image (from branch code)
+    GitHubActions->>AWS_ECR: Push Docker Image to branch-specific ECR
+    AWS_ECR-->>GitHubActions: Image push successful
+    GitHubActions->>CDK: Update ECS Service (with new image tag)
+    CDK->>AWS_ECS: Update Task Definition & Deploy new version of Application
+    AWS_ECS-->>CDK: Application deployment successful
+    CDK-->>GitHubActions: Application deployment complete
+    GitHubActions->>GitHub: Report deployment status & Load Balancer URL
+```
+
+### App-Only Deployment Workflow
+
+This diagram shows the process for deploying only the application to an existing environment.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant GitHub
+    participant GitHubActions as GitHub Actions
+    participant CDK
+    participant AWS_ECR as AWS ECR
+    participant AWS_ECS as AWS ECS
+
+    User->>GitHubActions: Trigger "App-Only Deployment" workflow (manually or via commit)
+    GitHubActions->>GitHubActions: Inputs: branch/environment name
+    GitHubActions->>CDK: Check if environment infrastructure exists
+    CDK->>AWS_ECS: Verify ECS Service/Cluster for environment exists
+    AWS_ECS-->>CDK: Environment found / not found
+    alt Environment Exists
+        CDK-->>GitHubActions: Environment confirmed
+        GitHubActions->>GitHubActions: Build Docker Image (from specified branch code)
+        GitHubActions->>AWS_ECR: Push Docker Image to existing ECR repository (for the environment)
+        AWS_ECR-->>GitHubActions: Image push successful
+        GitHubActions->>CDK: Update ECS Service (with new image tag)
+        CDK->>AWS_ECS: Update Task Definition & Deploy new version of Application
+        AWS_ECS-->>CDK: Application deployment successful
+        CDK-->>GitHubActions: Application deployment complete
+        GitHubActions->>GitHub: Report deployment status
+    else Environment Does Not Exist
+        CDK-->>GitHubActions: Environment not found, advise user
+        GitHubActions->>GitHub: Report error: Environment does not exist
+    end
+```
+
+### Branch Environment Cleanup Workflow
+
+This diagram outlines the process for cleaning up and deleting a branch environment.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant GitHub
+    participant GitHubActions as GitHub Actions
+    participant CDK
+    participant AWS_ECR as AWS ECR
+    participant AWS_ECS as AWS ECS
+    participant AWS_Cloud as AWS Cloud (VPC, LB, etc.)
+
+    alt Automated Cleanup (Branch Deletion)
+        User->>GitHub: Delete branch
+        GitHub->>GitHubActions: Trigger "Branch Environment Cleanup" workflow
+    else Manual Cleanup
+        User->>GitHubActions: Trigger "Branch Environment Cleanup" workflow manually
+        GitHubActions->>GitHubActions: Inputs: branch/environment name to cleanup
+    end
+
+    GitHubActions->>CDK: Identify resources for the specified branch/environment
+    CDK->>AWS_ECS: Get ECS Service & Task Definition details
+    CDK->>AWS_ECR: Get ECR Repository details
+    CDK->>AWS_Cloud: Get other infrastructure details (LB, IAM, etc.)
+
+    GitHubActions->>CDK: Destroy Infrastructure for the branch/environment
+    CDK->>AWS_ECS: Delete ECS Service, Task Definitions
+    AWS_ECS-->>CDK: ECS resources deleted
+    CDK->>AWS_ECR: Delete ECR Repository (including all images)
+    AWS_ECR-->>CDK: ECR repository deleted
+    CDK->>AWS_Cloud: Delete VPC, Load Balancer, IAM Roles, Security Groups, etc.
+    AWS_Cloud-->>CDK: Cloud infrastructure deleted
+    CDK-->>GitHubActions: Infrastructure cleanup complete
+    GitHubActions->>GitHub: Report cleanup status
+```
+
+### User-Friendly Deployment Interface (`🚀 Déployer une application`)
+
+This diagram illustrates the simplified deployment interface workflow, which allows users to choose between a full environment deployment or an application-only update.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant GitHubUI as GitHub Actions UI
+    participant DeployerWorkflow as "🚀 Déployer une application Workflow"
+    participant BranchEnvWorkflow as "Branch Environment Deployment Workflow"
+    participant AppOnlyWorkflow as "App-Only Deployment Workflow"
+
+    User->>GitHubUI: Navigate to Actions tab
+    User->>GitHubUI: Select "🚀 Déployer une application" workflow
+    User->>GitHubUI: Click "Run workflow"
+    GitHubUI->>DeployerWorkflow: Initiate with user inputs
+    DeployerWorkflow->>DeployerWorkflow: User provides inputs:
+    Note right of DeployerWorkflow: - Type (Complete Environment / App-Only)
+    Note right of DeployerWorkflow: - Branch Name
+    Note right of DeployerWorkflow: - Environment Name (optional)
+
+    alt User chooses "Complete Environment"
+        DeployerWorkflow->>BranchEnvWorkflow: Trigger with branch & environment name
+        BranchEnvWorkflow-->>DeployerWorkflow: Report status
+        Note left of BranchEnvWorkflow: (Executes full sequence: 
+        Note left of BranchEnvWorkflow: CDK Infra Provisioning, 
+        Note left of BranchEnvWorkflow: Docker Build & Push, 
+        Note left of BranchEnvWorkflow: ECS Deployment)
+    else User chooses "App-Only"
+        DeployerWorkflow->>AppOnlyWorkflow: Trigger with branch & environment name
+        AppOnlyWorkflow-->>DeployerWorkflow: Report status
+        Note left of AppOnlyWorkflow: (Executes app update sequence: 
+        Note left of AppOnlyWorkflow: Docker Build & Push, 
+        Note left of AppOnlyWorkflow: ECS Service Update)
+    end
+
+    DeployerWorkflow->>GitHubUI: Display overall status and results to user
+```
+
+And here's a top-down graph view of the same user-friendly workflow:
+
+```mermaid
+graph TD
+    A[User Initiates<br>🚀 Déployer une application] --> B{User Selects Deployment Type};
+    B -- Choice: Complete Environment --> C[Trigger: Branch Environment Deployment Workflow];
+    C --> D["CDK: Provisions Full Infrastructure<br>(VPC, ECR, ECS Cluster, Service, LB, IAM)"];
+    D --> E[GitHub Actions: Builds & Pushes Docker Image];
+    E --> F[CDK: Deploys Application to New ECS Service];
+
+    B -- Choice: App-Only --> G[Trigger: App-Only Deployment Workflow];
+    G --> H[CDK: Verifies Existing Infrastructure];
+    H --> I[GitHub Actions: Builds & Pushes Docker Image];
+    I --> J[CDK: Updates Existing ECS Service with New Image];
+
+    F --> K[Deployment Complete];
+    J --> K;
+```
+
+### Detailed Workflow: Branch Environment Deployment (graph TD)
+
+This graph provides a more detailed breakdown of the `Branch Environment Deployment` workflow, illustrating the key stages from triggering the workflow to a live, branch-specific environment.
+
+```mermaid
+graph TD
+    subgraph Workflow Trigger
+        A1["User Pushes New Branch / Manually Triggers Workflow"]
+    end
+
+    A1 --> B[GitHub Actions: Initialize Job];
+    B --> C["Checkout Source Code"];
+    C --> D["Configure AWS Credentials (OIDC)"];
+    D --> E["Set up Node.js & Install Dependencies (incl. CDK)"];
+
+    subgraph CDK: Provision Initial Infrastructure
+        E --> F1["CDK Synthesize (Generates CloudFormation Template for Branch Stack)"];
+        F1 --> F2["CDK Deploy Branch Stack"];
+        F2 --> F3["AWS CloudFormation: Create Resources"];
+        F3 --> F4["- VPC & Networking (Subnets, Route Tables, IGW, NAT Gateway if new)"];
+        F3 --> F5["- IAM Roles (Task Role, Execution Role)"];
+        F3 --> F6["- ECR Repository (branch-specific name)"];
+        F3 --> F7["- ECS Cluster (or use existing)"];
+        F3 --> F8["- ECS Service (Fargate, with placeholder Task Definition)"];
+        F3 --> F9["- Application Load Balancer & Target Group"];
+        F3 --> F10["- Security Groups"];
+        F10 --> F11[Infrastructure Provisioned];
+    end
+
+    subgraph Docker Build & Push
+        F11 --> G1["GitHub Actions: Build Docker Image (from branch code)"];
+        G1 --> G2["Login to AWS ECR"];
+        G2 --> G3["Tag Docker Image (e.g., branch_name, git_sha)"];
+        G3 --> G4["Push Docker Image to Branch ECR Repository"];
+    end
+
+    subgraph CDK: Deploy Application to ECS
+        G4 --> H1["CDK Synthesize (Update with new image in Task Definition)"];
+        H1 --> H2["CDK Deploy (Applies changes to Branch Stack)"];
+        H2 --> H3["AWS CloudFormation: Update ECS Service"];
+        H3 --> H4["- Create New ECS Task Definition Revision (with new image)"];
+        H4 --> H5["- Update ECS Service to use new Task Definition Revision"];
+        H5 --> H6["- ECS initiates new Fargate tasks, registers with ALB"];
+    end
+
+    subgraph Finalization
+        H6 --> I1["Output: Load Balancer URL & Deployment Status"];
+        I1 --> I2[Workflow Complete: Branch Environment Ready];
+    end
+```
