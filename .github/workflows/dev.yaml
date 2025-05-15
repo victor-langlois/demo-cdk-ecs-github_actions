@@ -1,4 +1,4 @@
-name: Development
+name: Development Environment Deployment
 on:
   # push:
   #   branches:
@@ -19,8 +19,8 @@ env:
   BUILD_SOURCE_VERSION: ${{ github.sha }}
 
 jobs:
-  iam_deploy:
-    name: Deploy IAM Task execution Role Development
+  DeployIAMStack:
+    name: Deploy IAM Stack (Development)
     runs-on: ubuntu-latest
     environment: Development
     permissions:
@@ -49,9 +49,9 @@ jobs:
         working-directory: infra
         run: |
           yarn cdk:deploy:iam-stack
-  ecr_deploy:
-    needs: iam_deploy
-    name: Deploy ECR Task execution Development
+  DeployECRStack:
+    needs: DeployIAMStack
+    name: Deploy ECR Stack (Development)
     runs-on: ubuntu-latest
     environment: Development
     permissions:
@@ -76,9 +76,9 @@ jobs:
         working-directory: infra
         run: |
           yarn cdk:deploy:ecr-stack
-  docker_deploy:
-    needs: ecr_deploy
-    name: Build Development
+  BuildAndPushDockerImage:
+    needs: DeployECRStack
+    name: Build and Push Docker Image (Development)
     runs-on: ubuntu-latest
     environment: Development
     permissions:
@@ -103,9 +103,9 @@ jobs:
           --build-arg BUILD_SOURCE_VERSION=$BUILD_SOURCE_VERSION
           docker tag $APPLICATION_ID-$ENVIRONMENT:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$APPLICATION_ID-$ENVIRONMENT:$IMAGE_TAG
           docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$APPLICATION_ID-$ENVIRONMENT:$IMAGE_TAG
-  ecs_deploy:
-    needs: docker_deploy
-    name: Deploy ECS Task execution Development
+  DeployECSStack:
+    needs: BuildAndPushDockerImage
+    name: Deploy ECS Stack (Development)
     runs-on: ubuntu-latest
     environment: Development
     permissions:
