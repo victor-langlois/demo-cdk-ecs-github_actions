@@ -1,4 +1,23 @@
 name: App-Only Deployment
+# -----------------------------------------------------------------------------
+# Ce workflow permet de déployer uniquement l'application sans recréer
+# l'infrastructure sous-jacente. Cela permet des déploiements plus rapides
+# pour les mises à jour de code fréquentes.
+#
+# IMPORTANT: Ce workflow doit être exécuté uniquement après qu'un environnement
+# complet a été créé via le workflow 'branch-deploy.yaml'. Il vérifie si
+# l'environnement existe déjà et échoue si ce n'est pas le cas.
+#
+# Utilisation:
+# 1. Allez dans l'onglet "Actions" de GitHub
+# 2. Sélectionnez "App-Only Deployment"
+# 3. Cliquez sur "Run workflow"
+# 4. Entrez le nom de l'environnement (doit correspondre à un environnement existant)
+# 5. Vous pouvez spécifier un tag Docker personnalisé (optionnel)
+#
+# Ce workflow utilise CDK pour mettre à jour l'ECS afin d'éviter le drift
+# d'infrastructure, plutôt que d'utiliser l'AWS CLI directement.
+# -----------------------------------------------------------------------------
 on:
   workflow_dispatch:
     inputs:
